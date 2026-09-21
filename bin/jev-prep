@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""jev-prep — turn an extract.js element table into jev-ask inputs.
+
+Reads the JSON produced by extract/extract.js (run in the page via your MCP
+client's evaluate_script), plus the current goal, and writes:
+
+  <outdir>/state.txt       GOAL + VALUES + numbered ELEMENTS (the Jev state)
+  <outdir>/questions.json  a fan-out question set: next (choice over all
+                           candidates + escape moves), done (noul), and
+                           value (choice over --values) when values exist
+
+Usage:
+  jev-prep --extract .browser-state/extract-3.json --goal "Log in and add the backpack to the cart"
+  jev-prep --extract e.json --goal "..." --values '{"username":"standard_user"}'
+  jev-prep --extract e.json --goal "..." --outdir .browser-state
+
+Prints a JSON summary to stdout: {"state": "...", "questions": "...", "candidates": N}
+
+Then decide:
+  jev-ask --state .browser-state/state.txt --questions .browser-state/questions.json --threshold 0.6
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+SPECIAL_MOVES = {
+    "__back": "Go back to the previous page",
+    "__scroll": "Scroll down to see more of the current page",
+    "__wait": "Do nothing, the page is still loading",
+}
+
+NEXT_INSTRUCTIONS = (
+    "Pick the single control or move that makes the most progress toward the GOAL. "
+    "Prefer a control whose visible text or context matches the goal. "
+    "If a page is still loading or nothing is relevant, choose __wait."
+)
+DONE_INSTRUCTIONS = "Is the GOAL already fully achieved on this page, with nothing left to do?"
+VALUE_INSTRUCTIONS = (
+    "If the chosen element is a text field, which value should be typed into it? "
+    "Answer with the most likely match for that field's label or purpose."
+)
+
+
+def fail(msg: str) -> None:
+    print(f"jev-prep: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def describe(c: dict) -> str:
+    d = f'{c.get("role", "?")} "{c.get("name", "")}"'
+    if c.get("value"):
+        d += f'  = "{c["value"]}"'
+    elif c.get("checked"):
+        d += "  [checked]"
+    if c.get("context"):
+        d += f'  in {c["context"]}'
+    return d
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="jev-prep", description="extract.js output -> jev-ask state + questions")
+    ap.add_argument("--extract", required=True, help="extract.js JSON output file (or - for stdin)")
+    ap.add_argument("--goal", required=True, help="current goal / subgoal text")
+    ap.add_argument("--values", default="{}", help='JSON object of typable values, e.g. {"username":"standard_user"}')
+    ap.add_argument("--outdir", default=".browser-state")
+    args = ap.parse_args()
+
+    raw = sys.stdin.read() if args.extract == "-" else open(args.extract).read()
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError as e:
+        fail(f"extract output is not valid JSON: {e}")
+    candidates = table.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        fail("extract output has no candidates — is the page loaded and visible?")
+    try:
+        values = json.loads(args.values)
+    except json.JSONDecodeError as e:
+        fail(f"--values is not valid JSON: {e}")
+
+    # --- state.txt ---
+    lines = [f"GOAL: {args.goal}", "", f"PAGE: {table.get('url', '')} — {table.get('title', '')}", ""]
+    if values:
+        lines.append("VALUES AVAILABLE FOR TYPING")
+        lines += [f"  {k} = {v}" for k, v in values.items()]
+        lines.append("")
+    lines.append("ELEMENTS ON SCREEN")
+    criteria: dict[str, str] = {}
+    for c in candidates:
+        idx = str(c["idx"])
+        lines.append(f"[{idx}] {describe(c)}")
+        criteria[idx] = describe(c)
+    if table.get("truncated"):
+        lines.append(f"(... {table['truncated']} more elements not shown)")
+
+    # --- questions.json ---
+    criteria.update(SPECIAL_MOVES)
+    questions: dict[str, dict] = {
+        "next": {"type": "choice", "instructions": NEXT_INSTRUCTIONS, "criteria": criteria},
+        "done": {"type": "noul", "instructions": DONE_INSTRUCTIONS},
+    }
+    if values:
+        questions["value"] = {
+            "type": "choice",
+            "instructions": VALUE_INSTRUCTIONS,
+            "criteria": {k: f"type the text: {v}" for k, v in values.items()},
+        }
+
+    os.makedirs(args.outdir, exist_ok=True)
+    state_path = os.path.join(args.outdir, "state.txt")
+    questions_path = os.path.join(args.outdir, "questions.json")
+    with open(state_path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(questions_path, "w") as fh:
+        json.dump(questions, fh, ensure_ascii=False, indent=2)
+
+    print(json.dumps({"state": state_path, "questions": questions_path, "candidates": len(candidates)}))
+
+
+if __name__ == "__main__":
+    main()

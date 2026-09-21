@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""jev-ask — ask TypeSafe Jev (System One) typed questions from any agent.
+
+A zero-dependency CLI wrapper around the /v1/systemone decision API.
+JSON in, JSON out, exit code signals confidence — any agent with shell
+access (pi, Claude Code, Codex, Cursor, cron, plain bash) can use it.
+
+Usage:
+  jev-ask --state page.txt --questions questions.json
+  cat page.txt | jev-ask --state - --questions questions.json
+  jev-ask --state page.txt --questions questions.json --threshold 0.8
+
+Questions file format (mirrors the API contract):
+  {
+    "next":  {"type": "choice", "instructions": "Pick the control that...",
+              "criteria": {"1": "button \"Login\"", "2": "link \"Sign up\""}},
+    "done":  {"type": "noul", "instructions": "Is the goal fully achieved?"},
+    "risk":  {"type": "score", "instructions": "Rate how irreversible this is"}
+  }
+
+Output (stdout):
+  {"model": "...", "answers": {"next": {"type": "choice", "choice": "1",
+   "confidence": 0.92, "probabilities": {...}}, ...}, "usage": {...}}
+
+Exit codes:
+  0  success, all choice answers at or above --threshold
+  1  runtime error (network, auth, bad response)
+  2  usage error (bad arguments, unreadable files)
+  3  success, but at least one choice answer is below --threshold
+
+Environment:
+  TYPESAFE_API_KEY   required (get one at https://typesafe.ai)
+  TYPESAFE_BASE_URL  optional, defaults to https://api.typesafe.ai
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_BASE = "https://api.typesafe.ai"
+VALID_TYPES = {"choice", "noul", "score"}
+
+
+def read_arg(value: str) -> str:
+    """Read from a file path, or stdin when value is '-'."""
+    if value == "-":
+        return sys.stdin.read()
+    try:
+        with open(value) as fh:
+            return fh.read()
+    except OSError as e:
+        print(f"jev-ask: cannot read {value}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+def validate_questions(raw: str) -> dict:
+    try:
+        questions = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"jev-ask: questions file is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(questions, dict) or not questions:
+        print("jev-ask: questions must be a non-empty JSON object", file=sys.stderr)
+        sys.exit(2)
+    for qid, q in questions.items():
+        if not isinstance(q, dict) or q.get("type") not in VALID_TYPES:
+            print(f"jev-ask: question {qid!r} needs a type of choice/noul/score", file=sys.stderr)
+            sys.exit(2)
+        if not q.get("instructions"):
+            print(f"jev-ask: question {qid!r} is missing instructions", file=sys.stderr)
+            sys.exit(2)
+        if q["type"] == "choice" and not isinstance(q.get("criteria"), dict):
+            print(f"jev-ask: choice question {qid!r} needs a criteria object", file=sys.stderr)
+            sys.exit(2)
+    return questions
+
+
+def ask(base: str, key: str, model: str, state: str, questions: dict, retries: int = 2) -> dict:
+    body = json.dumps({"model": model, "state": state, "questions": questions}).encode()
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            f"{base}/v1/systemone",
+            data=body,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:300]
+            last = RuntimeError(f"HTTP {e.code}: {detail}")
+            if e.code in (429, 500, 502, 503, 529) and attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        except (urllib.error.URLError, TimeoutError) as e:
+            last = RuntimeError(f"network error: {e}")
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+    print(f"jev-ask: request failed: {last}", file=sys.stderr)
+    sys.exit(1)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        prog="jev-ask",
+        description="Ask TypeSafe Jev typed decision questions. JSON in, JSON out.",
+    )
+    ap.add_argument("--state", required=True, help="state file path, or - for stdin")
+    ap.add_argument("--questions", required=True, help="questions JSON file path")
+    ap.add_argument("--model", default=os.environ.get("JEV_MODEL", "jev-latest"),
+                    help="model id (default: jev-latest, or $JEV_MODEL)")
+    ap.add_argument("--threshold", type=float, default=0.0,
+                    help="exit 3 if any choice answer confidence is below this (e.g. 0.6)")
+    ap.add_argument("--pretty", action="store_true", help="pretty-print the output JSON")
+    args = ap.parse_args()
+
+    key = os.environ.get("TYPESAFE_API_KEY", "")
+    if not key:
+        print("jev-ask: TYPESAFE_API_KEY is not set", file=sys.stderr)
+        sys.exit(2)
+    base = os.environ.get("TYPESAFE_BASE_URL", DEFAULT_BASE).rstrip("/")
+
+    state = read_arg(args.state)
+    questions = validate_questions(read_arg(args.questions))
+    resp = ask(base, key, args.model, state, questions)
+
+    indent = 2 if args.pretty else None
+    print(json.dumps(resp, ensure_ascii=False, indent=indent))
+
+    # Confidence gate: any choice answer below threshold -> exit 3.
+    answers = resp.get("answers") or {}
+    low = [
+        (qid, a.get("confidence"))
+        for qid, a in answers.items()
+        if a.get("type") == "choice"
+        and a.get("confidence") is not None
+        and a["confidence"] < args.threshold
+    ]
+    for qid, conf in low:
+        print(f"jev-ask: {qid} confidence {conf} below threshold {args.threshold}", file=sys.stderr)
+    sys.exit(3 if low else 0)
+
+
+if __name__ == "__main__":
+    main()

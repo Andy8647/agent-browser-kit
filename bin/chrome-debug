@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# chrome-debug — launch a dedicated Chrome instance with a CDP endpoint
+# (default :9222) for chrome-devtools-mcp or any CDP client.
+#
+# Idempotent: if the port is already listening, reuse it and touch nothing.
+# Uses a separate profile (~/.chrome-debug-profile) so your daily Chrome
+# stays untouched and never needs to be quit.
+#
+# Usage: chrome-debug [port]     (default port: 9222)
+set -euo pipefail
+
+port="${1:-9222}"
+profile="${CHROME_DEBUG_PROFILE:-$HOME/.chrome-debug-profile}"
+
+# Port already listening → reuse, touch nothing
+if curl -s --max-time 1 "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1; then
+    echo "OK: debug Chrome already listening on :${port}"
+    exit 0
+fi
+
+# -n opens a new instance. --disable-features=... blocks Optimization Guide
+# from downloading the ~4 GB on-device Gemini Nano model.
+if ! open -na "Google Chrome" --args "--remote-debugging-port=${port}" "--user-data-dir=${profile}" --disable-features=OptimizationGuideModelDownloading; then
+    echo "ERROR: failed to launch Google Chrome" >&2
+    exit 1
+fi
+
+for _ in $(seq 1 50); do
+    if curl -s --max-time 1 "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1; then
+        echo "OK: debug Chrome ready on :${port} (profile: ${profile})"
+        exit 0
+    fi
+    sleep 0.5
+done
+
+echo "ERROR: port :${port} not responding within 25s of launch" >&2
+exit 1

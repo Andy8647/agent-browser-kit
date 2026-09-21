@@ -1,0 +1,11 @@
+{
+  "url": "https://www.saucedemo.com/",
+  "title": "Swag Labs",
+  "candidates": [
+    {"idx": 1, "role": "textbox", "action": "fill", "name": "Username", "context": "Login", "inputType": "text", "selectOptions": [], "value": "", "checked": false},
+    {"idx": 2, "role": "textbox", "action": "fill", "name": "Password", "context": "Login", "inputType": "password", "selectOptions": [], "value": "", "checked": false},
+    {"idx": 3, "role": "button", "action": "click", "name": "Login", "context": "Login", "inputType": "submit", "selectOptions": [], "value": "Login", "checked": false}
+  ],
+  "totalMatched": 3,
+  "truncated": 0
+}
