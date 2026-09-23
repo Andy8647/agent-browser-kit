@@ -69,7 +69,7 @@ export TYPESAFE_API_KEY=...        # https://typesafe.ai
 
 | path | what |
 |---|---|
-| `bin/chrome-debug` | idempotent launcher for a dedicated debug Chrome (separate profile from daily Chrome, blocks the 4 GB Gemini Nano download, keeps the debug profile's theme local via `SeparateLocalAndAccountThemes` so the two Chromes stay visually distinct) |
+| `bin/chrome-debug` | idempotent launcher for a dedicated debug Chrome (separate profile from daily Chrome, blocks the 4 GB Gemini Nano download, disables account-scoped prefs so a signed-in debug profile doesn't roam themes to/from your daily Chrome — see the script header for the one-time profile pref edit) |
 | `bin/abk-fetch` | silent CDP helper: background tabs (`Target.createTarget background:true`), session-cookie fetch/download, per-attach focus emulation. `/json/new` has no background mode — never use it for silent work |
 | `bin/jev-ask` | zero-dep CLI for the Jev `/v1/systemone` API; JSON in/out, exit code 3 = low confidence. Also available [standalone](https://github.com/Andy8647/jev-ask) |
 | `bin/jev-prep` | glue: extract.js output + goal → `state.txt` + `questions.json` for jev-ask |

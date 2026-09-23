@@ -20,11 +20,18 @@ fi
 
 # -n opens a new instance. --disable-features=... blocks Optimization Guide
 # from downloading the ~4 GB on-device Gemini Nano model.
-# --enable-features=SeparateLocalAndAccountThemes: Chrome otherwise roams the
-# theme through the signed-in Google ACCOUNT even with sync off (known upstream
-# behavior; this flag keeps the debug profile's local theme independent so the
-# two Chromes are visually distinguishable at a glance).
-if ! open -na "Google Chrome" --args "--remote-debugging-port=${port}" "--user-data-dir=${profile}" --disable-features=OptimizationGuideModelDownloading --enable-features=SeparateLocalAndAccountThemes; then
+# Theme isolation vs. the signed-in Google account. Chrome roams themes via
+# ACCOUNT STORAGE (not the sync toggle), in BOTH directions — changing a theme
+# on either side overwrites the other. SeparateLocalAndAccountThemes alone was
+# NOT enough (Chrome 153: the local→account write still flowed). What actually
+# works: --disable-features=AccountScopedPrefs + one-time per-profile pref edit
+# (while this Chrome is CLOSED):
+#   jq '.signin.prefs_themes_search_engines_account_storage_enabled = false' \
+#      ~/.chrome-debug-profile/Default/Preferences > tmp && mv tmp back
+# Then chrome://settings/appearance → Theme → "Reset to default" once.
+# Verified Chrome 153: debug stays default-white across restarts, main keeps
+# its own theme, neither side propagates.
+if ! open -na "Google Chrome" --args "--remote-debugging-port=${port}" "--user-data-dir=${profile}" --disable-features=OptimizationGuideModelDownloading,AccountScopedPrefs --enable-features=SeparateLocalAndAccountThemes; then
     echo "ERROR: failed to launch Google Chrome" >&2
     exit 1
 fi
