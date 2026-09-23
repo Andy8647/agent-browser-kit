@@ -20,7 +20,11 @@ fi
 
 # -n opens a new instance. --disable-features=... blocks Optimization Guide
 # from downloading the ~4 GB on-device Gemini Nano model.
-if ! open -na "Google Chrome" --args "--remote-debugging-port=${port}" "--user-data-dir=${profile}" --disable-features=OptimizationGuideModelDownloading; then
+# --enable-features=SeparateLocalAndAccountThemes: Chrome otherwise roams the
+# theme through the signed-in Google ACCOUNT even with sync off (known upstream
+# behavior; this flag keeps the debug profile's local theme independent so the
+# two Chromes are visually distinguishable at a glance).
+if ! open -na "Google Chrome" --args "--remote-debugging-port=${port}" "--user-data-dir=${profile}" --disable-features=OptimizationGuideModelDownloading --enable-features=SeparateLocalAndAccountThemes; then
     echo "ERROR: failed to launch Google Chrome" >&2
     exit 1
 fi
