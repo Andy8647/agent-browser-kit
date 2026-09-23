@@ -1,6 +1,6 @@
 ---
 name: browser-control
-description: "Drive a dedicated debug Chrome via chrome-devtools-mcp, with Jev as a fast decision layer. Covers: chrome-debug launcher, snapshot-to-disk + rg retrieval (3x cheaper on large pages), extract.js candidate tables, jev-ask/jev-prep decision loop, confidence thresholds by reversibility, DONE-as-hypothesis verification. Use when controlling a browser for real tasks — login-required or JS-heavy sites, form filling, multi-step navigation, repetitive batch web work. 当任务是用浏览器完成真实操作（需要登录/JS 渲染的站点、填表、多步导航、批量网页任务）时加载。"
+description: "Drive a dedicated debug Chrome via chrome-devtools-mcp, with Jev as a fast decision layer. Covers: chrome-debug launcher, snapshot-to-disk + rg retrieval (3x cheaper on large pages), extract.js candidate tables, jev-ask/jev-prep decision loop, confidence thresholds by reversibility, DONE-as-hypothesis verification, abk-fetch silent background tabs + session downloads. Use when controlling a browser for real tasks — login-required or JS-heavy sites, form filling, multi-step navigation, repetitive batch web work. 当任务是用浏览器完成真实操作（需要登录/JS 渲染的站点、填表、多步导航、批量网页任务）时加载。"
 ---
 
 # Browser Control: hands + reflexes + brain
@@ -88,6 +88,27 @@ For dropdown options (`select_option` candidates), act on the parent select's id
 ### 5. DONE is always a hypothesis
 
 Never trust `done` (from Jev or your own judgment) as proof. Verify completion with an independent JS check of the actual end state (cart count, URL, confirmation text). This is non-negotiable — false-DONE is the most common silent failure mode.
+
+## Silent batch work: abk-fetch (no focus stealing)
+
+The MCP loop is interactive. For **bulk / background work** — crawling a list of pages, downloading files through the site's login session — use `bin/abk-fetch` instead. Two capabilities the MCP lacks:
+
+1. **Background tabs.** `Target.createTarget {background: true}` never steals focus (measured: default foreground create = 3/3 steals, background = 0/3). `new_page` (MCP) and `/json/new` (CDP HTTP) have NO background mode — **never use them when the user is at the machine**.
+2. **Session downloads.** `fetch(url, {credentials:'include'})` inside a tab borrows its cookies — works on login-walled sites (course Moodle, internal tools) without exporting cookies.
+
+```sh
+uv run --with websockets abk-fetch bg-new <url>                    # prints targetId; waits for load
+uv run --with websockets abk-fetch eval  <tid> 'document.title'    # JSON out
+uv run --with websockets abk-fetch fetch <tid> <url>               # HTML/text via session
+uv run --with websockets abk-fetch download <tid> <url> <out>      # binary via session; refuses to save HTML error pages as files
+uv run --with websockets abk-fetch close <tid>                     # clean up every tab you opened
+```
+
+Rules:
+- Work on the user's existing tabs by pageId when possible; every tab you open, close when done.
+- Never `bringToFront` / `select_page(bringToFront: true)` / activate.
+- **Downloading over an existing local file is an overwrite → gate it**: show the diff evidence (size / page count / first-page text), ask the human, and move the old version into an archive dir — never leave the only copy of a replaced file in `/tmp`.
+- Keep a sync/download log (source URL → local path → hash/size → skipped-why) so "already had it" claims are auditable.
 
 ## Red lines
 

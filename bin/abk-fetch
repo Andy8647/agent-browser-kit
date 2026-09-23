@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""abk-fetch — silent CDP helper for background browser work (no focus stealing).
+
+Zero-dep beyond `websockets` (run with: uv run --with websockets abk-fetch ...).
+
+The chrome-devtools MCP covers the interactive loop (navigate/snapshot/click/fill),
+but it has no way to open a BACKGROUND tab and no way to download files through the
+page's login session. This tool fills exactly that gap:
+
+  abk-fetch list                        -> list open pages (targetId, title, url)
+  abk-fetch bg-new <url>                -> open background tab (NEVER steals focus), print targetId
+  abk-fetch eval <targetId> <js|file.js>-> evaluate JS expression, print JSON value
+  abk-fetch fetch <targetId> <url>      -> fetch url with the tab's session cookies, print body
+  abk-fetch download <targetId> <url> <out>
+                                        -> fetch url as binary through the session, save to out
+  abk-fetch close <targetId>            -> close the background tab
+
+Silence rules (benchmarked in browser-control-bench):
+- Tabs are created with Target.createTarget {background: true}. Default (foreground)
+  steals focus 3/3; background 0/3. `/json/new` has NO background parameter — do not
+  use it for silent work.
+- Every attached session re-enables Emulation.setFocusEmulationEnabled so background
+  tabs are not throttled. Sessions are per-command, so this must be re-set on attach.
+- No activateTarget / bringToFront anywhere in this file. Keep it that way.
+"""
+import asyncio
+import base64
+import json
+import sys
+import urllib.request
+
+import websockets
+
+PORT = 9222
+CONTEXT_GONE = ("Execution context was destroyed", "Cannot find context", "Inspected target navigated")
+
+
+def http_json(path, method="GET"):
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", method=method)
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+async def browser_ws():
+    ver = http_json("/json/version")
+    return await websockets.connect(ver["webSocketDebuggerUrl"], max_size=100 * 1024 * 1024)
+
+
+async def send(ws, id_, method, params=None, session_id=None):
+    msg = {"id": id_, "method": method, "params": params or {}}
+    if session_id:
+        msg["sessionId"] = session_id
+    await ws.send(json.dumps(msg))
+    while True:
+        resp = json.loads(await ws.recv())
+        if resp.get("id") == id_:
+            return resp
+
+
+async def attach(ws, target_id):
+    """Attach and re-enable focus emulation — sessions are per-command, so a
+    setting applied in a previous command is gone. Must run on every attach."""
+    r = await send(ws, 1, "Target.attachToTarget", {"targetId": target_id, "flatten": True})
+    sid = r["result"]["sessionId"]
+    await send(ws, 2, "Emulation.setFocusEmulationEnabled", {"enabled": True}, sid)
+    return sid
+
+
+async def evaluate(ws, sid, expr, timeout_ms=120000):
+    """Runtime.evaluate with ONE retry: a navigation between attach and evaluate
+    destroys the execution context and the call fails spuriously."""
+    params = {"expression": expr, "awaitPromise": True, "returnByValue": True, "timeout": timeout_ms}
+    for attempt in (1, 2):
+        r = await send(ws, 10 * attempt + 2, "Runtime.evaluate", params, sid)
+        res = r.get("result", {})
+        exc = res.get("exceptionDetails") or {}
+        text = (exc.get("exception") or {}).get("description", "") + exc.get("text", "") + json.dumps(r.get("error") or {})
+        if any(k in text for k in CONTEXT_GONE) and attempt == 1:
+            await asyncio.sleep(1.0)
+            continue
+        if "error" in r or exc:
+            print(json.dumps({"error": r}, indent=2)[:3000], file=sys.stderr)
+            sys.exit(1)
+        return res.get("result", {}).get("value")
+
+
+async def wait_ready(ws, sid, timeout_s=25):
+    """Poll until document.readyState is complete (or timeout)."""
+    for _ in range(int(timeout_s * 4)):
+        val = await evaluate(ws, sid, "document.readyState", timeout_ms=10000)
+        if val == "complete":
+            return
+        await asyncio.sleep(0.25)
+
+
+async def cmd_bg_new(url):
+    async with await browser_ws() as ws:
+        r = await send(ws, 1, "Target.createTarget", {"url": url, "background": True})
+        tid = r["result"]["targetId"]
+        sid = await attach(ws, tid)
+        await send(ws, 3, "Page.enable", {}, sid)
+        await wait_ready(ws, sid)
+        print(tid)
+
+
+async def cmd_eval(target_id, expr):
+    async with await browser_ws() as ws:
+        sid = await attach(ws, target_id)
+        val = await evaluate(ws, sid, expr)
+        print(json.dumps(val) if not isinstance(val, str) else val)
+
+
+async def cmd_fetch(target_id, url):
+    expr = f"fetch({json.dumps(url)}, {{credentials: 'include'}}).then(r => r.text())"
+    await cmd_eval(target_id, expr)
+
+
+async def cmd_download(target_id, url, out):
+    expr = f"""fetch({json.dumps(url)}, {{credentials: 'include'}}).then(async r => {{
+        if (!r.ok) return {{error: r.status, url: r.url}};
+        const buf = await r.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        const CHUNK = 32768;
+        for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        return {{b64: btoa(bin), type: r.headers.get('content-type'), finalUrl: r.url, size: bytes.length}};
+    }})"""
+    async with await browser_ws() as ws:
+        sid = await attach(ws, target_id)
+        val = await evaluate(ws, sid, expr)
+        if not val or "error" in val:
+            print(json.dumps(val or "no result")[:1000], file=sys.stderr)
+            sys.exit(1)
+        ctype = val.get("type") or ""
+        if "text/html" in ctype and not out.endswith(".html"):
+            # refusing to save an HTML error/landing page as a "download"
+            print(json.dumps({"error": "got HTML instead of file", "finalUrl": val.get("finalUrl"), "size": val.get("size")}), file=sys.stderr)
+            sys.exit(2)
+        data = base64.b64decode(val["b64"])
+        with open(out, "wb") as f:
+            f.write(data)
+        print(json.dumps({"saved": out, "size": len(data), "type": ctype, "finalUrl": val.get("finalUrl")}))
+
+
+async def cmd_close(target_id):
+    async with await browser_ws() as ws:
+        await send(ws, 1, "Target.closeTarget", {"targetId": target_id})
+        print("closed")
+
+
+def cmd_list():
+    for t in http_json("/json/list"):
+        if t.get("type") == "page":
+            print(f"{t['id']}\t{t.get('title', '')[:60]}\t{t.get('url', '')[:100]}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    cmd = sys.argv[1]
+    if cmd == "bg-new":
+        asyncio.run(cmd_bg_new(sys.argv[2]))
+    elif cmd == "eval":
+        expr = open(sys.argv[3]).read() if sys.argv[3].endswith(".js") else sys.argv[3]
+        asyncio.run(cmd_eval(sys.argv[2], expr))
+    elif cmd == "fetch":
+        asyncio.run(cmd_fetch(sys.argv[2], sys.argv[3]))
+    elif cmd == "download":
+        asyncio.run(cmd_download(sys.argv[2], sys.argv[3], sys.argv[4]))
+    elif cmd == "close":
+        asyncio.run(cmd_close(sys.argv[2]))
+    elif cmd == "list":
+        cmd_list()
+    else:
+        sys.exit(f"unknown command {cmd}\n{__doc__}")
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,7 @@ A complete browser-control setup for LLM agents: **hands + reflexes + brain**.
 | layer | component | role |
 |---|---|---|
 | **Hands** | `chrome-debug` + [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) | launch and drive a dedicated Chrome instance (navigate, snapshot, click, fill, evaluate) |
+| **Hands (batch)** | `abk-fetch` | background tabs + downloads through the page's login session — silent bulk work the MCP can't do |
 | **Reflexes** | `jev-ask` + `extract/extract.js` | [TypeSafe Jev](https://typesafe.ai) makes fast bounded decisions (pick element, done?, risky?) in ~0.6s for ~$0.0001 |
 | **Brain** | your agent (pi, Claude Code, Codex, …) | planning, text generation, recovery, anything Jev shouldn't touch |
 
@@ -20,6 +21,9 @@ cd agent-browser-kit
 
 # 1. Hands: the Chrome launcher (macOS)
 cp bin/chrome-debug ~/.local/bin/ && chmod +x ~/.local/bin/chrome-debug
+
+# 1b. Hands: silent batch fetch/download helper (run via: uv run --with websockets abk-fetch ...)
+cp bin/abk-fetch ~/.local/bin/ && chmod +x ~/.local/bin/abk-fetch
 
 # 2. Hands: register chrome-devtools-mcp with your agent host.
 #    See mcp/mcp.json for a known-good config (pi syntax; adapt for your host).
@@ -66,6 +70,7 @@ export TYPESAFE_API_KEY=...        # https://typesafe.ai
 | path | what |
 |---|---|
 | `bin/chrome-debug` | idempotent launcher for a dedicated debug Chrome (separate profile from daily Chrome, blocks the 4 GB Gemini Nano download) |
+| `bin/abk-fetch` | silent CDP helper: background tabs (`Target.createTarget background:true`), session-cookie fetch/download, per-attach focus emulation. `/json/new` has no background mode — never use it for silent work |
 | `bin/jev-ask` | zero-dep CLI for the Jev `/v1/systemone` API; JSON in/out, exit code 3 = low confidence. Also available [standalone](https://github.com/Andy8647/jev-ask) |
 | `bin/jev-prep` | glue: extract.js output + goal → `state.txt` + `questions.json` for jev-ask |
 | `extract/extract.js` | in-page element-table extractor; the disambiguation context (4-layer heuristic) is the accuracy-critical piece |
@@ -73,6 +78,20 @@ export TYPESAFE_API_KEY=...        # https://typesafe.ai
 | `mcp/mcp.json` | known-good chrome-devtools-mcp config |
 | `skills/browser-control/SKILL.md` | the whole workflow as an installable agent skill |
 | `examples/` | a runnable saucedemo example (state, questions, expected flow) |
+
+## Silent background work (no focus stealing)
+
+Interactive steps go through the MCP, but two common needs fall outside it: opening a tab **without** focusing it, and downloading files through the page's login session. `abk-fetch` covers both, over raw CDP on :9222:
+
+```sh
+uv run --with websockets abk-fetch bg-new <url>          # background tab, prints targetId (never activates)
+uv run --with websockets abk-fetch eval  <tid> '<js>'    # JS in that tab, JSON out
+uv run --with websockets abk-fetch fetch <tid> <url>     # GET via the tab's cookies (scraping)
+uv run --with websockets abk-fetch download <tid> <url> <out>  # binary download via session
+uv run --with websockets abk-fetch close <tid>
+```
+
+`new_page` (MCP) and `/json/new` (CDP HTTP) both open foreground tabs — benchmarked focus stealers. `Target.createTarget {background: true}` is the only measured-silent way to open a page.
 
 ## Why these design choices (short version)
 
